@@ -924,7 +924,8 @@ padding:16px;
                     <p class="text-cyan-400 font-bold text-xl tracking-widest">Ray Zone</p>
                   </div>
                 </div>
-                ${this.step > 2 ? `<button id="rrz_backBtn" class="bg-white/10 px-4 py-2 rounded-xl text-sm font-bold hover:bg-white/20 transition">← عودة</button>` : ''}
+                ${this.step === 2 ? `<button id="rrz_dashboardBtn" class="bg-white/10 px-4 py-2 rounded-xl text-sm font-bold hover:bg-white/20 transition text-yellow-300">Back to Dashboard</button>` : ''}
+                ${this.step > 2 ? `<button id="rrz_backBtn" class="bg-white/10 px-4 py-2 rounded-xl text-sm font-bold hover:bg-white/20 transition ${this.step===4?'text-yellow-300':''}">${this.step===4?'Go to Record Voice':'← عودة'}</button>` : ''}
               </div>
             </div>
 
@@ -1014,7 +1015,7 @@ padding:16px;
                 </div>
               </div>
 
-              <button id="rrz_toVoice" class="rrz-btn-primary w-full text-white py-4 rounded-xl font-bold text-lg mt-8 shadow-lg">الذهاب لتسجيل التقرير ←</button>
+              <button id="rrz_toVoice" class="rrz-btn-primary text-white px-6 py-2 rounded-xl font-bold text-base mt-4 shadow-lg max-w-xs w-full mx-auto block">الذهاب لتسجيل التقرير ←</button>
             </div>
           `;
         },
@@ -1029,7 +1030,7 @@ padding:16px;
               </div>
 
               <button id="rrz_rec" class="rrz-btn-primary text-white px-10 py-3 rounded-xl font-bold text-lg mb-6 shadow-lg hover:shadow-2xl transform hover:-translate-y-1 transition-all duration-300 w-64">
-                ${this.processing ? 'Processing…' : (this.recording ? 'Stop Voice' : 'Start Voice')}
+                ${this.processing ? 'Processing…' : (this.recording ? 'Recording… (release to stop)' : 'Hold to Record')}
               </button>
               <div id="rrz_liveBadge" class="mt-2 text-gray-500 text-xs font-semibold" style="min-height:18px;"></div>
 
@@ -1116,6 +1117,9 @@ padding:16px;
           const backBtn = document.getElementById('rrz_backBtn');
           if (backBtn) backBtn.onclick = () => this.gotoStep(this.step - 1);
 
+          const dashBtn = document.getElementById('rrz_dashboardBtn');
+          if (dashBtn) dashBtn.onclick = () => { window.location.href = 'dashboard.html'; };
+
           const openAnn = document.getElementById('rrz_openAnnotator');
           if(openAnn) openAnn.onclick = () => window.U_SHOW('ann');
 
@@ -1157,9 +1161,36 @@ padding:16px;
           const toVoice = document.getElementById('rrz_toVoice');
           if (toVoice) toVoice.onclick = () => this.gotoStep(3);
 
-          const rec = document.getElementById('rrz_rec');
+                    const rec = document.getElementById('rrz_rec');
           if (rec) {
-            rec.onclick = () => this.toggleDictation();
+            // Press-and-hold recording: hold to record, release to process
+            const startHold = (e) => {
+              try { e.preventDefault(); } catch(_) {}
+              if (this.processing) return;
+              if (!this.recording) this.startDictation();
+              // Capture pointer so releasing outside still stops
+              if (e && e.pointerId != null && rec.setPointerCapture) {
+                try { rec.setPointerCapture(e.pointerId); } catch(_) {}
+              }
+            };
+            const stopHold = (e) => {
+              try { e.preventDefault(); } catch(_) {}
+              if (this.recording) this.stopDictation();
+            };
+
+            // Pointer events (modern)
+            rec.onpointerdown = startHold;
+            rec.onpointerup = stopHold;
+            rec.onpointercancel = stopHold;
+            rec.onpointerleave = stopHold;
+
+            // Touch fallback
+            rec.ontouchstart = startHold;
+            rec.ontouchend = stopHold;
+            rec.ontouchcancel = stopHold;
+
+            // Prevent normal click toggle
+            rec.onclick = (e) => { try { e.preventDefault(); } catch(_) {} };
           }
 const expImage = document.getElementById('rrz_expImage');
           if (expImage) {
