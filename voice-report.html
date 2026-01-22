@@ -5,16 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Royal Ray Zone + AccuRay Annotator (Unified)</title>
 
-  
-
-  <!-- PWA -->
-  <link rel="manifest" href="manifest_rrz.webmanifest">
-  <meta name="theme-color" content="#0f172a">
-  <link rel="apple-touch-icon" href="logo.png">
-  <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-
-<!-- Royal Ray Zone deps -->
+  <!-- Royal Ray Zone deps -->
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 
@@ -649,7 +640,12 @@
         patient: { name: '', id: '', date: new Date().toISOString().split('T')[0] },
         report: { findings: '', impression: '' },
         recording: false,
-        aiPolishUnavailable: false,
+        processing: false,
+        aiNotice: '',
+        rawTranscript: '',
+        reportFindingsHtml: '',
+        reportImpressionHtml: '',
+        speech: { rec: null, active: false, finalText: '', interimText: '', stopRequested: false },
         selectedTemplate: 'custom',
         templateImageDataUrl: null,
         workLogoDataUrl: 'logo.png',
@@ -680,6 +676,235 @@
           this.render();
         },
         gotoStep(n){ this.step = Math.max(2, n); this.render(); },
+
+        // ===== Voice-to-Report (Best possible using Web Speech API) =====
+        getSpeechCtor(){
+          return window.SpeechRecognition || window.webkitSpeechRecognition || null;
+        },
+        ensureSpeech(){
+          const Ctor = this.getSpeechCtor();
+          if(!Ctor) return null;
+          if(this.speech.rec) return this.speech.rec;
+
+          const r = new Ctor();
+          // Force English for dictation (user speaks English)
+          r.lang = "en-US";
+          // Use interim for live feedback, but we only COMMIT final results to avoid duplication
+          r.interimResults = true;
+          // Single-session dictation reduces repeated segments on mobile
+          r.continuous = false;
+
+          r.onresult = (event) => {
+            let interim = "";
+            for(let i = event.resultIndex; i < event.results.length; i++){
+              const res = event.results[i];
+              const t = (res && res[0] && res[0].transcript) ? res[0].transcript : "";
+              if(res.isFinal){
+                // Append final only
+                this.speech.finalText += (t ? (t.trim() + " ") : "");
+              } else {
+                interim += t;
+              }
+            }
+            this.speech.interimText = interim.trim();
+
+            // Optional: show a minimal live indicator (doesn't affect workflow)
+            const badge = document.getElementById("rrz_liveBadge");
+            if(badge && this.recording){
+              const show = (this.speech.interimText || "").trim();
+              badge.textContent = show ? ("Listening: " + show.slice(0, 60) + (show.length > 60 ? "…" : "")) : "Listening…";
+            }
+          };
+
+          r.onerror = () => {
+            // Do not show technical errors to user (fallback will handle)
+          };
+
+          r.onend = () => {
+            // Many mobile browsers auto-end after a short pause.
+            // If user didn't manually stop, treat this as "Stop" and finalize once.
+            if(this.recording && !this.speech.stopRequested){
+              this.speech.stopRequested = true;
+              // finalize without calling stop() again
+              this.finalizeDictation({ fromEnd: true, skipStopCall: true });
+            }
+          };
+
+          this.speech.rec = r;
+          return r;
+        },
+        collapseRepeatedWords(text){
+          return (text || "").replace(/\b(\w+)(\s+\1\b)+/gi, "$1");
+        },
+        dedupeNgrams(text, n = 6){
+          const words = (text || "").split(/\s+/).filter(Boolean);
+          const out = [];
+          const seen = new Set();
+          for(let i = 0; i < words.length; i++){
+            if(i <= words.length - n){
+              const gram = words.slice(i, i + n).join(" ").toLowerCase();
+              if(seen.has(gram)) continue;
+              seen.add(gram);
+            }
+            out.push(words[i]);
+          }
+          return out.join(" ");
+        },
+        cleanTranscript(text){
+          let t = (text || "").trim();
+          t = t.replace(/\s+/g, " ");
+          t = this.collapseRepeatedWords(t);
+          t = this.dedupeNgrams(t, 6);
+          return t.trim();
+        },
+        escapeHtml(s){
+          return (s || "")
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;")
+            .replace(/'/g, "&#039;");
+        },
+        formatFindingsHtml(cleanText){
+          const t = (cleanText || "").trim();
+          if(!t) return "";
+          // Split into short sentences/bullets for readability
+          const parts = t
+            .replace(/\s*(?:\band then\b|\bthen\b)\s*/gi, ". ")
+            .split(/[.?!]\s+/)
+            .map(x => x.trim())
+            .filter(Boolean);
+
+          // If we don't have enough sentence boundaries, keep as a paragraph
+          if(parts.length <= 1){
+            return `<p style="margin-top: 8px; line-height: 1.7;">${this.escapeHtml(t)}</p>`;
+          }
+
+          const bullets = parts.slice(0, 12); // keep concise
+          const rest = parts.slice(12).join(". ");
+          return `
+            <ul style="margin-top: 10px; padding-left: 18px; line-height: 1.7;">
+              ${bullets.map(x => `<li>${this.escapeHtml(x)}.</li>`).join("")}
+            </ul>
+            ${rest ? `<p style="margin-top: 10px; line-height: 1.7;">${this.escapeHtml(rest)}.</p>` : ``}
+          `;
+        },
+        makeImpressionFromFindings(cleanText){
+          const t = (cleanText || "").trim();
+          if(!t) return "";
+          const s = t.split(/[.?!]\s+/).map(x => x.trim()).filter(Boolean);
+          return (s.slice(0, 2).join(". ") + (s.length ? "." : "")).trim();
+        },
+        async polishViaDeepSeek(cleanText){
+          // Proxy endpoint (Netlify Function / Worker) — key never in the browser
+          const url = "/.netlify/functions/deepseek-polish";
+          const r = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text: cleanText })
+          });
+
+          if(!r.ok){
+            const raw = await r.text().catch(()=> "");
+            throw new Error(raw || ("HTTP " + r.status));
+          }
+          const data = await r.json();
+          return {
+            findings: (data && data.findings) ? String(data.findings) : cleanText,
+            impression: (data && data.impression) ? String(data.impression) : ""
+          };
+        },
+        async finalizeDictation(opts = {}){
+          try{
+            // Stop recording UI, show processing state
+            this.recording = false;
+            this.processing = true;
+            this.render();
+
+            const finalOnly = ((this.speech.finalText || "").trim() || (this.speech.interimText || "").trim());
+            const cleaned = this.cleanTranscript(finalOnly);
+
+            // Reset live badge
+            const badge = document.getElementById("rrz_liveBadge");
+            if(badge) badge.textContent = "";
+
+            this.rawTranscript = cleaned;
+
+            if(!cleaned){
+              this.processing = false;
+              this.render();
+              alert("No clear speech detected. Please try again (speak closer to the microphone).");
+              return;
+            }
+
+            // Try AI polish; fallback silently if any error (including insufficient_balance)
+            let out;
+            try{
+              out = await this.polishViaDeepSeek(cleaned);
+              this.aiNotice = "";
+            }catch(_e){
+              out = {
+                findings: cleaned,
+                impression: this.makeImpressionFromFindings(cleaned)
+              };
+              this.aiNotice = "AI polishing unavailable — showing raw transcript.";
+            }
+
+            // Store for preview rendering (HTML formatting for findings)
+            this.report = {
+              findings: out.findings || "",
+              impression: out.impression || ""
+            };
+            this.reportFindingsHtml = this.formatFindingsHtml(this.report.findings);
+            this.reportImpressionHtml = `<p style="margin-top: 8px; font-weight: 700;">${this.escapeHtml(this.report.impression || "")}</p>`;
+
+            this.processing = false;
+            this.gotoStep(4);
+          }finally{
+            // cleanup flags
+            this.speech.active = false;
+          }
+        },
+        async startDictation(){
+          const r = this.ensureSpeech();
+          if(!r){
+            alert("Speech recognition is not supported on this browser/device. (Try Chrome on Android / Desktop.)");
+            return;
+          }
+          // Reset state
+          this.speech.stopRequested = false;
+          this.speech.finalText = "";
+          this.speech.interimText = "";
+          this.speech.active = true;
+
+          this.aiNotice = "";
+          this.rawTranscript = "";
+          this.processing = false;
+
+          this.recording = true;
+          this.render();
+
+          try{
+            r.start();
+          }catch(_e){
+            // Some browsers require a user gesture; we are in onClick so should work
+          }
+        },
+        async stopDictation(){
+          // Manual stop — finalize once
+          this.speech.stopRequested = true;
+          const r = this.ensureSpeech();
+          if(r){
+            try{ r.stop(); }catch(_e){}
+          }
+          await this.finalizeDictation({ fromEnd: false, skipStopCall: false });
+        },
+        async toggleDictation(){
+          if(this.recording) return this.stopDictation();
+          if(this.processing) return; // ignore clicks during processing
+          return this.startDictation();
+        },
+
 
         render(){
           const container = document.getElementById('rrzApp');
@@ -798,8 +1023,9 @@
               </div>
 
               <button id="rrz_rec" class="rrz-btn-primary text-white px-10 py-3 rounded-xl font-bold text-lg mb-6 shadow-lg hover:shadow-2xl transform hover:-translate-y-1 transition-all duration-300 w-64">
-                ${this.recording ? 'جاري التحليل الذكي...' : 'Start Voice'}
+                ${this.processing ? 'Processing…' : (this.recording ? 'Stop Voice' : 'Start Voice')}
               </button>
+              <div id="rrz_liveBadge" class="mt-2 text-gray-500 text-xs font-semibold" style="min-height:18px;"></div>
 
               <div class="mt-2">
                 <input type="file" id="rrz_refImgInput" class="hidden" accept="image/*">
@@ -839,16 +1065,16 @@
                     <p>Case ID: <span style="font-weight: 400;">${this.patient.id}</span></p>
                   </div>
 
-                  ${this.aiPolishUnavailable ? '<div style="margin: 0 0 18px; padding: 10px 12px; border: 1px solid #f59e0b; background: #fff7ed; border-radius: 10px; color: #9a3412; font-weight: 700;">AI polishing unavailable — showing raw transcript.</div>' : ''}
+                  ${this.aiNotice ? `<div style="margin: 14px 0; padding: 10px 12px; border-radius: 12px; background: #fff7ed; border: 1px solid #fed7aa; color: #9a3412; font-weight: 700;">${this.aiNotice}</div>` : ``}
 
                   <div style="margin-bottom: 25px;">
                     <h3 style="font-weight: 800; border-left: 5px solid #3b82f6; padding-left: 10px; color: #1e3a5f;">FINDINGS</h3>
-                    <p style="margin-top: 8px; line-height: 1.6;">${this.report.findings}</p>
+                    ${this.reportFindingsHtml ? this.reportFindingsHtml : `<p style="margin-top: 8px; line-height: 1.6;">${this.escapeHtml(this.report.findings)}</p>`}
                   </div>
 
                   <div style="margin-bottom: 25px;">
                     <h3 style="font-weight: 800; border-left: 5px solid #3b82f6; padding-left: 10px; color: #1e3a5f;">IMPRESSION</h3>
-                    <p style="margin-top: 8px; font-weight: 700;">${this.report.impression}</p>
+                    ${this.reportImpressionHtml ? this.reportImpressionHtml : `<p style="margin-top: 8px; font-weight: 700;">${this.escapeHtml(this.report.impression)}</p>`}
                   </div>
 
                   ${this.imageDataUrl ? `<div style="text-align: center; margin-top: 30px;"><img src="${this.imageDataUrl}" style="max-height: 280px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); display: inline-block;"></div>` : ''}
@@ -924,183 +1150,12 @@
 
           const toVoice = document.getElementById('rrz_toVoice');
           if (toVoice) toVoice.onclick = () => this.gotoStep(3);
+
           const rec = document.getElementById('rrz_rec');
           if (rec) {
-            // Voice to Report: Speech -> Text -> DeepSeek polish (via SAME-ORIGIN proxy)
-            // IMPORTANT: Do NOT store DeepSeek API key in the frontend. Use Netlify Function / Worker with env vars.
-            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-
-            const vs = (this._rrzVoiceState = this._rrzVoiceState || {
-              rec: null,
-              active: false,
-              finalText: '',
-              silenceTimer: null
-            });
-
-            const ensureRec = () => {
-              if (!SpeechRecognition) return null;
-              if (vs.rec) return vs.rec;
-
-              const r = new SpeechRecognition();
-              r.lang = 'en-US';
-              r.interimResults = true;
-              r.continuous = true;
-
-              r.onresult = (event) => {
-                // Collect finals
-                let finalAcc = '';
-                for (let i = event.resultIndex; i < event.results.length; i++) {
-                  const res = event.results[i];
-                  const txt = (res[0] && res[0].transcript) ? res[0].transcript : '';
-                  if (res.isFinal) finalAcc += txt + ' ';
-                }
-                if (finalAcc) vs.finalText += finalAcc;
-
-                // Silence auto-stop: reset timer on any result
-                if (vs.active) {
-                  if (vs.silenceTimer) clearTimeout(vs.silenceTimer);
-                  vs.silenceTimer = setTimeout(() => {
-                    // Auto-stop after short silence
-                    stopAndProcess(false);
-                  }, 1600);
-                }
-              };
-
-              r.onerror = (e) => {
-                console.warn('SpeechRecognition error:', e);
-              };
-
-              r.onend = () => {
-                // If still active, keep listening (some browsers auto-end)
-                if (vs.active) {
-                  try { r.start(); } catch (_) {}
-                }
-              };
-
-              vs.rec = r;
-              return r;
-            };
-
-            const callDeepSeekProxy = async (rawText) => {
-              const text = (rawText || '').trim();
-              if (!text) return { findings: '', impression: '' };
-
-              const endpoint = window.RRZ_DEEPSEEK_PROXY_URL || '/.netlify/functions/deepseek-polish';
-
-              const resp = await fetch(endpoint, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  text,
-                  patient: { name: this.patient.name, id: this.patient.id, date: this.patient.date },
-                  template: this.selectedTemplate || ''
-                })
-              });
-
-              if (!resp.ok) {
-                const t = await resp.text();
-                throw new Error(t || ('HTTP ' + resp.status));
-              }
-
-              const data = await resp.json();
-              const findings = (data.findings ?? data.FINDINGS ?? data.text ?? data.result ?? '').toString().trim();
-              const impression = (data.impression ?? data.IMPRESSION ?? '').toString().trim();
-              return { findings: findings || text, impression };
-            };
-
-            const setReportFallback = (text) => {
-              const t = (text || '').trim();
-              if (!t) {
-                this.report = {
-                  findings: "Examination shows normal clinical findings for the selected modality. No acute radiographic abnormalities detected. Soft tissues appear unremarkable.",
-                  impression: "No significant abnormalities identified. Normal study."
-                };
-              } else {
-                this.report = { findings: t, impression: "" };
-              }
-            };
-
-            const startVoice = async () => {
-              vs.finalText = '';
-              vs.active = true;
-
-              const r = ensureRec();
-              if (!r) {
-                alert('Speech Recognition غير مدعوم على هذا المتصفح. استخدم Chrome على Android/PC أو استخدم بديل STT على السيرفر.');
-                vs.active = false;
-                this.recording = false;
-                this.render();
-                return;
-              }
-
-              // Start listening
-              try { r.start(); } catch (_) {}
-
-              // Start initial silence timer (in case user is silent)
-              if (vs.silenceTimer) clearTimeout(vs.silenceTimer);
-              vs.silenceTimer = setTimeout(() => {
-                stopAndProcess(false);
-              }, 6000);
-            };
-
-            const stopAndProcess = async (manual) => {
-              if (!vs.active && !manual) return;
-              vs.active = false;
-
-              if (vs.silenceTimer) { clearTimeout(vs.silenceTimer); vs.silenceTimer = null; }
-
-              // Stop recognition
-              if (vs.rec) {
-                try { vs.rec.stop(); } catch (_) {}
-              }
-
-              // Keep "analysis" UI state while we call DeepSeek
-              this.recording = true;
-              this.render();
-
-              const raw = (vs.finalText || '').trim();
-
-              // Reset AI notice for this run
-              this.aiPolishUnavailable = false;
-
-              try {
-                if (!raw) {
-                  setReportFallback(raw);
-                } else {
-                  const polished = await callDeepSeekProxy(raw);
-                  this.report = {
-                    findings: polished.findings || raw,
-                    impression: polished.impression || ""
-                  };
-                  this.aiPolishUnavailable = false;
-                }
-              } catch (e) {
-                console.warn('DeepSeek polish failed; using raw transcript.', e);
-                this.aiPolishUnavailable = true;
-                // Use raw transcript (or default if empty)
-                setReportFallback(raw);
-              }
-
-              this.recording = false;
-              this.gotoStep(4);
-            };
-
-            rec.onclick = async () => {
-              if (!this.recording) {
-                // Start dictation
-                this.recording = true;
-                this.render();
-                try { await startVoice(); } catch (e) { console.warn(e); }
-              } else {
-                // Manual stop
-                this.recording = false;
-                this.render();
-                try { await stopAndProcess(true); } catch (e) { console.warn(e); }
-              }
-            };
+            rec.onclick = () => this.toggleDictation();
           }
-
-          const expImage = document.getElementById('rrz_expImage');
+const expImage = document.getElementById('rrz_expImage');
           if (expImage) {
             expImage.onclick = async () => {
               const area = document.getElementById('report-capture-area');
@@ -2582,19 +2637,5 @@ $("a_downloadGridBtn").addEventListener("click", ()=>{
       window.addEventListener("resize", resize);
     })();
   </script>
-
-  <script>
-    // PWA Service Worker (safe registration)
-    (function(){
-      if('serviceWorker' in navigator){
-        window.addEventListener('load', function(){
-          navigator.serviceWorker.register('sw_rrz.js').catch(function(e){
-            console.warn('SW register failed:', e);
-          });
-        });
-      }
-    })();
-  </script>
-
 </body>
 </html>
