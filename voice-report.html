@@ -649,6 +649,7 @@
         patient: { name: '', id: '', date: new Date().toISOString().split('T')[0] },
         report: { findings: '', impression: '' },
         recording: false,
+        aiPolishUnavailable: false,
         selectedTemplate: 'custom',
         templateImageDataUrl: null,
         workLogoDataUrl: 'logo.png',
@@ -837,6 +838,8 @@
                     <p>Date: <span style="font-weight: 400;">${this.patient.date}</span></p>
                     <p>Case ID: <span style="font-weight: 400;">${this.patient.id}</span></p>
                   </div>
+
+                  ${this.aiPolishUnavailable ? '<div style="margin: 0 0 18px; padding: 10px 12px; border: 1px solid #f59e0b; background: #fff7ed; border-radius: 10px; color: #9a3412; font-weight: 700;">AI polishing unavailable — showing raw transcript.</div>' : ''}
 
                   <div style="margin-bottom: 25px;">
                     <h3 style="font-weight: 800; border-left: 5px solid #3b82f6; padding-left: 10px; color: #1e3a5f;">FINDINGS</h3>
@@ -1057,6 +1060,9 @@
 
               const raw = (vs.finalText || '').trim();
 
+              // Reset AI notice for this run
+              this.aiPolishUnavailable = false;
+
               try {
                 if (!raw) {
                   setReportFallback(raw);
@@ -1066,9 +1072,12 @@
                     findings: polished.findings || raw,
                     impression: polished.impression || ""
                   };
+                  this.aiPolishUnavailable = false;
                 }
               } catch (e) {
                 console.warn('DeepSeek polish failed; using raw transcript.', e);
+                this.aiPolishUnavailable = true;
+                // Use raw transcript (or default if empty)
                 setReportFallback(raw);
               }
 
