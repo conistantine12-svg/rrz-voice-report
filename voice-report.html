@@ -985,7 +985,7 @@ padding:16px;
                 </select>
               </div>
 
-              <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+              <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
                 <div class="p-4 border-2 border-dashed rounded-2xl text-center relative hover:bg-blue-50 transition ${this.selectedTemplate !== 'custom' ? 'opacity-50 pointer-events-none' : ''}">
                   <p class="font-bold text-xs text-blue-800 mb-2">1. رفع صورة إطار</p>
                   <input type="file" id="rrz_tplInput" class="hidden" accept="image/*">
@@ -1013,9 +1013,14 @@ padding:16px;
                   <button onclick="document.getElementById('rrz_sealInput').click()" class="bg-amber-100 text-amber-700 px-2 py-2 rounded-lg text-xs w-full mb-2 hover:bg-amber-200">رفع الختم</button>
                   ${this.sealDataUrl ? `<img src="${this.sealDataUrl}" class="h-12 mx-auto rounded shadow-sm">` : ''}
                 </div>
-              </div>
 
-              <button id="rrz_toVoice" class="rrz-btn-primary text-white px-6 py-2 rounded-xl font-bold text-base mt-4 shadow-lg max-w-xs w-full mx-auto block">الذهاب لتسجيل التقرير ←</button>
+                <div class="p-4 border-2 border-dashed rounded-2xl text-center hover:bg-emerald-50 transition">
+                  <p class="font-bold mb-2 text-xs text-emerald-800">5. الذهاب لتسجيل التقرير</p>
+                  <button id="rrz_toVoice" class="bg-emerald-100 text-emerald-700 px-2 py-2 rounded-lg text-xs w-full mb-2 hover:bg-emerald-200 font-bold">الذهاب لتسجيل التقرير ←</button>
+                  <p class="text-[11px] text-gray-500">ابدأ التسجيل بعد تجهيز الهوية.</p>
+                </div>
+
+              </div>
             </div>
           `;
         },
