@@ -218,7 +218,8 @@
       border-radius: var(--radius);
       box-shadow: var(--shadow);
       overflow:hidden;
-      height: calc(100vh - 32px);
+      /* Reduce drawing stage height so sidebar stays visible (desktop & mobile-friendly) */
+      height: min(62vh, calc(100vh - 240px));
       position:relative;
     }
     .annotatorRoot .a-stage{
@@ -330,8 +331,9 @@
       border-radius: var(--radius);
       box-shadow: var(--shadow);
       overflow:auto;
-      height: calc(100vh - 32px);
-      padding:16px;
+      /* Reduce grid stage height so sidebar stays visible */
+      height: min(62vh, calc(100vh - 240px));
+padding:16px;
       position:relative;
     }
     .annotatorRoot .gridOptions{
@@ -406,7 +408,11 @@
 @media (max-width: 980px) {
       .annotatorRoot .a-app, .annotatorRoot .gridContainer{ grid-template-columns: 1fr; }
       .annotatorRoot .a-sidebar, .annotatorRoot .gridSidebar{ position: relative; height: auto; }
-      .annotatorRoot .a-stageWrap, .annotatorRoot .gridStage{ height: 70vh; }
+      .annotatorRoot .a-stageWrap, .annotatorRoot .gridStage{ height: 46vh; }
+    }
+    @media (max-width: 480px) {
+      .annotatorRoot .a-stageWrap, .annotatorRoot .gridStage{ height: 40vh; }
+      .annotatorRoot .a-app{ padding: 12px; gap: 12px; }
     }
   </style>
 </head>
